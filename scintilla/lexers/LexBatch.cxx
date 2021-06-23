@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <set>
 
 #include "ILexer.h"
 #include "Scintilla.h"
@@ -68,17 +69,6 @@ constexpr bool IsLabelStart(int ch) noexcept {
 constexpr bool IsLabelChar(int ch) noexcept {
 	//return !AnyOf(ch, '\r', '\n', ' ', '\t', '|', '&', '%', '!', ',', ';', '=');
 	return IsIdentifierChar(ch) || ch == '.' || ch == '-';
-}
-
-constexpr bool IsVariableChar(int ch, char quote, Command command, int parenCount) noexcept {
-	return IsGraphic(ch) && !(AnyOf(ch, '%', '&', '<', '>', '|', '"', quote)
-		|| (parenCount != 0 && ch == ')')
-		|| (quote == '\0' && command == Command::For && AnyOf(ch, ',', ';', '=')));
-}
-
-constexpr bool IsVariableEscapeChar(int ch, char quote, Command command) noexcept {
-	return IsGraphic(ch) && !(ch == '%' || ch == quote
-		|| (quote == '\0' && command == Command::For && AnyOf(ch, ',', ';', '=')));
 }
 
 constexpr bool IsStringStyle(int style) noexcept {
@@ -144,57 +134,319 @@ bool DetectBatchEscapeChar(StyleContext &sc, int &outerStyle, Command command) {
 	return false;
 }
 
-constexpr bool IsTildeExpansion(int ch) noexcept {
-	return AnyOf(ch, 'f', 'd', 'p', 'n', 'x', 's', 'a', 't', 'z');
-}
+class BatchVariable {
+private:
+	// 1 letter variables of FOR
+	struct ValidIterator {
+		int ch;
+		int n;
+	};
 
-bool DetectBatchVariable(StyleContext &sc, int &outerStyle, int &varQuoteChar, Command command, int parenCount) {
-	varQuoteChar = '\0';
-	if (!IsGraphic(sc.chNext) || (sc.ch == '!' && (sc.chNext == '%' || sc.chNext == '!'))) {
-		return false;
+public:
+	int varQuoteChar = '\0'; // %var% or !var! after SetLocal EnableDelayedExpansion
+	Sci_PositionU detectedPos = 0;
+	std::vector<ValidIterator> ValidIterators;
+	std::vector<int> levelFor;
+	Sci_PositionU forOptionPos = 0;
+	size_t countDo = 0;
+
+	constexpr bool IsVariableChar(int ch, char quote, Command command, int parenCount) noexcept {
+		return IsGraphic(ch) && !(AnyOf(ch, '%', '&', '<', '>', '|', '"', quote)
+			|| (parenCount != 0 && ch == ')')
+			|| (quote == '\0' && (command == Command::For || command == Command::None) && AnyOf(ch, ',', ';', '=')));
 	}
 
-	outerStyle = IsStringStyle(sc.state) ? sc.state : SCE_BAT_DEFAULT;
-	sc.SetState(SCE_BAT_VARIABLE);
-	if (sc.ch == '!') {
-		varQuoteChar = '!';
+	constexpr bool IsVariableEscapeChar(int ch, char quote, Command command) noexcept {
+		return IsGraphic(ch) && !(ch == '%' || ch == quote
+			|| (quote == '\0' && command == Command::For && AnyOf(ch, ',', ';', '=')));
+	}
+
+	constexpr bool IsTildeExpansion(int ch) noexcept {
+		return AnyOf(tolower(ch), 'f', 'd', 'p', 'n', 'x', 's', 'a', 't', 'z');
+	}
+
+	bool IsValidIterator(int ch, int lenPercnet, bool isEscaped, char quote, Command command, int parenCount) noexcept {
+		bool ret = false;
+		if (lenPercnet != 2) {
+			return IsADigit(ch);
+		}
+		for (size_t i = ValidIterators.size(); i-- > 0; ) {
+			if (ValidIterators[i].ch <= ch && ch < ValidIterators[i].ch + ValidIterators[i].n) {
+				if (IsVariableChar(ch, quote, command, parenCount) || (isEscaped && IsVariableEscapeChar(ch, quote, command))) {
+					ret = true;
+				}
+			}
+		}
+		return ret;
+	}
+
+	char *SkipOneLineEnding(char *s) {
+		if (*s == '\r') {
+			s++;
+		}
+		if (*s == '\n') {
+			s++;
+		}
+		return s;
+	}
+
+	Sci_Position GetSegmentEnd(StyleContext &sc, Sci_Position pos) {
+		Sci_Line line = sc.styler.GetLine(pos);
+		Sci_Position end = 0;
+		char ch = 0;
+		for (; line <= sc.lineDocEnd; line++) {
+			end = sc.styler.LineEnd(line);
+			for (; pos < end; pos++) {
+				ch = sc.styler.SafeGetCharAt(pos);
+				if (AnyOf(ch, ' ', '\t', '\v', '\f')) {
+					return pos;
+				}
+			}
+			if (ch != '^') {
+				return end;
+			}
+		}
+		return end;
+	}
+
+	bool GetIteratorRange(char *s) {
+		if (s == NULL || !*s) {
+			return false;
+		}
+
+		std::set<int> tokensSet;
+		bool ret = false;
+
+		char *p = strstr(s, "tokens=");
+		if (p != NULL) {
+			p += 7;
+			long int m, n;
+			// strtol compatible, > 0; ',' is separator; '*': based on the last index, terminator, without ',' is allowed.
+			while (*p) {
+				if (*p == '*') {
+					// "tokens=*" is valid
+					if (tokensSet.empty()) {
+						m = 1;
+					} else {
+						m = *(tokensSet.rbegin()) + 1;
+					}
+					tokensSet.insert(m);
+					break;
+				}
+				m = strtol(p, &p, 0); // oct and hex are allowed
+				if (m <= 0) {
+					break;
+				}
+				if (*p == '-') {
+					// m-n
+					p++;
+					n = strtol(p, &p, 0);
+					if (n <= 0) {
+						break;
+					}
+				} else {
+					n = m;
+				}
+				if (n < 32) {
+					for (; m <= n; m++) {
+						tokensSet.insert(m);
+					}
+				}
+				if (*p == ',') {
+					p++;
+				} else if (*p != '*') {
+					break;
+				}
+			}
+		} else {
+			tokensSet.insert(1);
+			p = s;
+		}
+
+		p = strstr(p, "%%");
+		if (p != NULL && *(p += 2)) {
+			// ^"
+			bool isEscaped = false;
+			if (*p == '^') {
+				p++;
+				p = SkipOneLineEnding(p);
+				isEscaped = true;
+			}
+
+			int ch = (int)*p;
+			int n = (int)tokensSet.size();
+			if (IsValidIterator(ch, 2, isEscaped, '\0', Command::For, 0)) {
+				ValidIterators.clear();
+			} else {
+				if (!(IsVariableChar(ch, '\0', Command::For, 0) || (isEscaped && IsVariableEscapeChar(ch, '\0', Command::For)))) {
+					ch = '\0';
+					n = 0;
+				}
+				ValidIterator validIterator {ch, n};
+				ValidIterators.push_back(validIterator);
+			}
+			ret = true;
+		}
+
+		return ret;
+	}
+
+	bool Detect(StyleContext &sc, int &outerStyle, Command command, int parenCount) {
+		detectedPos = 0;
+		if (!IsGraphic(sc.chNext) || (sc.ch == '!' && (sc.chNext == '%' || sc.chNext == '!'))) {
+			return false;
+		}
+		outerStyle = IsStringStyle(sc.state) ? sc.state : SCE_BAT_DEFAULT;
+		sc.SetState(SCE_BAT_VARIABLE);
+		if (sc.ch == '!') {
+			varQuoteChar = '!';
+			return true;
+		}
+
+		if (sc.chNext == '*' || IsADigit(sc.chNext)) {
+			// %*, %0 ... %9
+			detectedPos = sc.currentPos + 1;
+		} else if (sc.chNext == '~' || sc.chNext == '%') {
+			// TODO: detect for loop to get valid variables in current scope.
+			const char quote = GetStringQuote(outerStyle);
+			int lenPercnet = sc.chNext == '%' ? 2 : 1;
+			bool invalidIterator = false;
+			Sci_PositionU start = sc.currentPos + lenPercnet;
+			Sci_PositionU end = GetSegmentEnd(sc, sc.currentPos);
+			Sci_PositionU lenExt = end - start + 1;
+			bool foundVar = false;
+
+			if (lenExt > 1) {
+				size_t lenOptionExt = command == Command::For ? start - forOptionPos : 0;
+				char *pStr = new char[lenOptionExt + lenExt];
+				char *s = pStr + lenOptionExt;
+				char *p = s;
+				bool escapedVar = false;
+
+				if (command == Command::For && lenOptionExt > 0) {
+					sc.styler.GetRangeLowered(forOptionPos, end, pStr, lenOptionExt + 1);
+				}
+				sc.styler.GetRange(start, end, s, lenExt);
+
+				if (command == Command::For && GetIteratorRange(pStr)) {
+					// only current tokens
+					levelFor.push_back(parenCount);
+				}
+
+				if (lenPercnet == 2 && *p == '^') {
+					escapedVar = true;
+					p++;
+					p = SkipOneLineEnding(p);
+				}
+				if (*p == '~') {
+					p++;
+				}
+				if (p > s) {
+					// %~, %%~
+					// see help for CALL and FOR commands
+					// for %%^" in (1 2 3) do echo %%^"
+					// see https://www.robvanderwoude.com/clevertricks.php
+					// `$` and `:` are occupied as the expanding search flags.
+					char *pSearch = strchr(p, '$');
+					char *pBak = p;
+					bool escapedBak = escapedVar;
+
+					while (*p) {
+						escapedVar = false;
+						if (*p == '^') {
+							escapedVar = true;
+							p++;
+							p = SkipOneLineEnding(p);
+						}
+						if (lenPercnet != 2 && escapedVar) {
+							invalidIterator = true;
+							break;
+						}
+						if (IsTildeExpansion(*p)) {
+							// expansion first
+							pBak = p;
+							escapedBak = escapedVar;
+							p++;
+							continue;
+						} else if (*p == '$') {
+							// invalid %%~$, %%~^$; valid %%~$Path:$
+						} else if (IsValidIterator(*p, lenPercnet, escapedVar, quote, command, parenCount)) {
+							foundVar = true;
+						}
+						break;
+					}
+
+					if (!foundVar && !invalidIterator) {
+						if (p == pSearch) {
+							lenExt = 0;
+							while (*p) {
+								p++;
+								escapedVar = false;
+								if (lenPercnet == 2 && *p == '^') {
+									escapedVar = true;
+									p++;
+									p = SkipOneLineEnding(p);
+								}
+								if (escapedVar) {
+									if (IsVariableEscapeChar(*p, quote, command) && *p != ':') {
+										lenExt++;
+										continue;
+									}
+								} else if (IsVariableChar(*p, quote, command, parenCount) && *p != ':') {
+									lenExt++;
+									continue;
+								}
+								break;
+							}
+							if (*p == ':' && lenExt > 0) {
+								p++;
+								escapedVar = false;
+								if (lenPercnet == 2 && *p == '^') {
+									escapedVar = true;
+									p++;
+									p = SkipOneLineEnding(p);
+								}
+							} else if (lenPercnet == 2) {
+								// invalid %%~na$ Vs valid %~n0$
+								invalidIterator = true;
+							}
+						} else {
+							// %~n0$
+							escapedVar = escapedBak;
+							p = pBak;
+						}
+					}
+				}
+
+				if (!foundVar && !invalidIterator) {
+					if (IsValidIterator(*p, lenPercnet, escapedVar, quote, command, parenCount)) {
+						foundVar = true;
+					} else {
+						invalidIterator = true;
+					}
+				}
+				lenExt = p - s;
+				delete[] pStr;
+			} else {
+				invalidIterator = true;
+			}
+
+			if (foundVar) {
+				detectedPos = sc.currentPos + lenPercnet + lenExt;
+			} else if (invalidIterator) {
+				if (lenPercnet == 2) {
+					sc.ChangeState(SCE_BAT_ESCAPECHAR);
+					sc.Forward();
+				} else {
+					detectedPos = sc.currentPos + 1;
+				}
+			}
+		} else {
+			varQuoteChar = '%';
+		}
 		return true;
 	}
-	if (sc.chNext == '*' || IsADigit(sc.chNext)) {
-		// %*, %0 ... %9
-		sc.Forward();
-	} else if (sc.chNext == '~' || sc.chNext == '%') {
-		// TODO: detect for loop to get valid variables in current scope.
-		const char quote = GetStringQuote(outerStyle);
-		sc.Forward();
-		if (sc.ch == '%') {
-			if (!IsVariableChar(sc.chNext, quote, command, parenCount)) {
-				sc.ChangeState(SCE_BAT_ESCAPECHAR);
-				return true;
-			}
-			sc.Forward();
-		}
-		if (sc.ch == '~' && IsVariableChar(sc.chNext, quote, command, parenCount)) {
-			// see help for CALL and FOR commands
-			sc.Forward();
-			while (IsTildeExpansion(sc.ch) && IsVariableChar(sc.chNext, quote, command, parenCount)) {
-				sc.Forward();
-			}
-			if (sc.ch == '$' && IsGraphic(sc.chNext)) {
-				varQuoteChar = ':';
-				return true;
-			}
-		}
-		if (sc.ch == '^' && IsVariableEscapeChar(sc.chNext, quote, command)) {
-			// for %%^" in (1 2 3) do echo %%^"
-			// see https://www.robvanderwoude.com/clevertricks.php
-			sc.Forward();
-		}
-	} else {
-		varQuoteChar = '%';
-	}
-	return true;
-}
+};
 
 static_assert(DefaultNestedStateBaseStyle + 1 == SCE_BAT_STRINGDQ);
 static_assert(DefaultNestedStateBaseStyle + 2 == SCE_BAT_STRINGSQ);
@@ -202,7 +454,6 @@ static_assert(DefaultNestedStateBaseStyle + 3 == SCE_BAT_STRINGBT);
 
 void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initStyle, LexerWordList keywordLists, Accessor &styler) {
 	const bool fold = styler.GetPropertyInt("fold", 1) & true;
-	int varQuoteChar = '\0'; // %var% or !var! after SetLocal EnableDelayedExpansion
 	int outerStyle = SCE_BAT_DEFAULT;
 	int logicalVisibleChars = 0;
 	int lineVisibleChars = 0;
@@ -211,6 +462,11 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 	int parenCount = 0;
 	int chPrevNonWhite = 0;
 	int stylePrevNonWhite = SCE_BAT_DEFAULT;
+
+	if (startPos != 0) {
+		// backtrack to the line start of outermost command.
+		BacktrackToStart(styler, BatchLineStateLineContinuation | (0xff << 8), startPos, lengthDoc, initStyle);
+	}
 
 	StyleContext sc(startPos, lengthDoc, initStyle, styler);
 	std::vector<int> nestedState;
@@ -243,6 +499,7 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 
 	int levelNext = levelCurrent;
 	int parenBefore = parenCount;
+	BatchVariable batchVar;
 
 	while (sc.More()) {
 		switch (sc.state) {
@@ -261,7 +518,7 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 			} else if (sc.ch == '^' || sc.ch == '%' || sc.ch == '!') {
 				const bool begin = logicalVisibleChars == sc.LengthCurrent();
 				const bool handled = (sc.ch == '^') ? DetectBatchEscapeChar(sc, outerStyle, command)
-					: DetectBatchVariable(sc, outerStyle, varQuoteChar, command, parenCount);
+					: batchVar.Detect(sc, outerStyle, command, parenCount);
 				if (handled) {
 					if (begin && command == Command::None) {
 						command = Command::Argument;
@@ -282,7 +539,12 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 						sc.ChangeState(SCE_BAT_WORD);
 						if (StrEqualsAny(s, "echo", "title")) {
 							command = Command::Echo;
-						} else if (StrEqualsAny(s, "do", "else")) {
+						} else if (StrEqual(s, "do")) {
+							logicalVisibleChars = 0;
+							if (batchVar.countDo < batchVar.levelFor.size()) {
+								batchVar.countDo++;
+							}
+						} else if (StrEqual(s, "else")) {
 							logicalVisibleChars = 0;
 						} else if (StrEqual(s, "goto")) {
 							command = Command::Goto;
@@ -293,6 +555,7 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 							command = Command::Set;
 						} else if (StrEqual(s, "for")) {
 							command = Command::For;
+							batchVar.forOptionPos = sc.currentPos;
 						}
 					} else if (keywordLists[1]->InList(s)) {
 						command = Command::Argument;
@@ -336,27 +599,17 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 			break;
 
 		case SCE_BAT_VARIABLE:
-			if (varQuoteChar) {
-				if (sc.ch == varQuoteChar) {
-					varQuoteChar = '\0';
-					sc.Forward();
-					if (sc.chPrev == ':') {
-						const char quote = GetStringQuote(outerStyle);
-						if (sc.ch == '^' && IsVariableEscapeChar(sc.chNext, quote, command)) {
-							sc.Forward(2);
-						} else if (IsVariableChar(sc.ch, quote, command, parenCount)) {
-							sc.Forward();
-						}
-					}
+			if (batchVar.varQuoteChar) {
+				if (sc.ch == batchVar.varQuoteChar) {
+					batchVar.varQuoteChar = '\0';
 				} else if (IsEOLChar(sc.ch) || sc.ch == GetStringQuote(outerStyle)) {
 					// something went wrong, e.g. ! without EnableDelayedExpansion.
-					varQuoteChar = '\0';
+					batchVar.varQuoteChar = '\0';
 					sc.ChangeState(outerStyle);
 					sc.Rewind();
 					sc.Forward();
 				}
-			}
-			if (varQuoteChar == '\0') {
+			} else if (sc.currentPos > batchVar.detectedPos) {
 				sc.SetState(outerStyle);
 				continue;
 			}
@@ -369,7 +622,7 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 			if (DetectBatchEscapeChar(sc, outerStyle, command)) {
 				// nop
 			} else if (sc.ch == '%' || sc.ch == '!') {
-				DetectBatchVariable(sc, outerStyle, varQuoteChar, command, parenCount);
+				batchVar.Detect(sc, outerStyle, command, parenCount);
 			} else if (sc.ch == '\"') {
 				int state = sc.state;
 				if (state == SCE_BAT_STRINGDQ) {
@@ -448,7 +701,7 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 					levelNext++;
 				}
 			} else if (DetectBatchEscapeChar(sc, outerStyle, command) ||
-				((sc.ch == '%' || sc.ch == '!') && DetectBatchVariable(sc, outerStyle, varQuoteChar, command, parenCount))) {
+				((sc.ch == '%' || sc.ch == '!') && batchVar.Detect(sc, outerStyle, command, parenCount))) {
 				if (logicalVisibleChars == 0 && command == Command::None) {
 					command = Command::Argument;
 				}
@@ -472,6 +725,16 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 						levelNext--;
 						if (parenCount < parenBefore) {
 							command = Command::None;
+						}
+						if (!batchVar.levelFor.empty() && parenCount == batchVar.levelFor.back() &&
+							batchVar.countDo == batchVar.levelFor.size()) {
+							// levelFor.back(): current FOR parenCount, `()` based;
+							// levelFor.size: current FOR tier, countDo: current DO tier, keyword based.
+							batchVar.levelFor.pop_back();
+							batchVar.countDo--;
+							if (!batchVar.ValidIterators.empty()) {
+								batchVar.ValidIterators.pop_back();
+							}
 						}
 					}
 				}
@@ -555,7 +818,7 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 			}
 
 			styler.SetLineState(sc.currentLine, lineState);
-			varQuoteChar = '\0';
+			batchVar.varQuoteChar = '\0';
 			outerStyle = SCE_BAT_DEFAULT;
 			lineVisibleChars = 0;
 
@@ -578,6 +841,20 @@ void ColouriseBatchDoc(Sci_PositionU startPos, Sci_Position lengthDoc, int initS
 				}
 				levelCurrent = levelNext;
 				prevLineState = lineState;
+			}
+
+			if (!batchVar.levelFor.empty() && stylePrevNonWhite != SCE_BAT_LINE_CONTINUATION) {
+				// levelFor.back(): current FOR parenCount, `()` based; levelFor.size: current FOR tier, countDo: current DO tier, keyword based.
+				// Exit FOR whose DO doesn't have child-levels, includes all of the last line. Ignore whether DO matches FOR or not.
+				while (parenCount == batchVar.levelFor.back()) {
+					batchVar.levelFor.pop_back();
+					if (!batchVar.ValidIterators.empty()) {
+						batchVar.ValidIterators.pop_back();
+					}
+				}
+				if (batchVar.countDo > batchVar.levelFor.size()) {
+					batchVar.countDo = (int)batchVar.levelFor.size();
+				}
 			}
 		}
 		sc.Forward();
