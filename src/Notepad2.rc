@@ -718,6 +718,11 @@ BEGIN
 			MENUITEM "Custom Action &1\tCtrl+Shift+1",		CMD_CUSTOM_ACTION1
 			MENUITEM "Custom Action &2\tCtrl+Shift+2",		CMD_CUSTOM_ACTION2
 		END
+		POPUP "&JSON"
+		BEGIN
+			MENUITEM "JSON &Format",						IDM_EDIT_JSON_FORMAT
+			MENUITEM "JSON &Compress",						IDM_EDIT_JSON_COMPRESS
+		END
 		POPUP "&Base64"
 		BEGIN
 			MENUITEM "Standard &Encode",					IDM_EDIT_BASE64_ENCODE

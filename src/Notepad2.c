@@ -2548,6 +2548,9 @@ void MsgInitMenu(HWND hwnd, WPARAM wParam, LPARAM lParam) {
 	EnableCmd(hmenu, IDM_EDIT_NUM2BIN, i);
 	EnableCmd(hmenu, IDM_EDIT_NUM2OCT, i);
 
+	EnableCmd(hmenu, IDM_EDIT_JSON_FORMAT, i);
+	EnableCmd(hmenu, IDM_EDIT_JSON_COMPRESS, i);
+
 	//EnableCmd(hmenu, IDM_EDIT_INCREASENUM, i);
 	//EnableCmd(hmenu, IDM_EDIT_DECREASENUM, i);
 
@@ -3784,6 +3787,13 @@ LRESULT MsgCommand(HWND hwnd, WPARAM wParam, LPARAM lParam) {
 	case IDM_EDIT_BASE64_DECODE_AS_HEX:
 		BeginWaitCursor();
 		EditBase64Decode(LOWORD(wParam) == IDM_EDIT_BASE64_DECODE_AS_HEX);
+		EndWaitCursor();
+		break;
+
+	case IDM_EDIT_JSON_FORMAT:
+	case IDM_EDIT_JSON_COMPRESS:
+		BeginWaitCursor();
+		EditJSONFormat(LOWORD(wParam) == IDM_EDIT_JSON_FORMAT);
 		EndWaitCursor();
 		break;
 

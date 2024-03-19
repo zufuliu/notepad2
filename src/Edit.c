@@ -2291,6 +2291,168 @@ void EditBase64Decode(bool decodeAsHex) {
 	NP2HeapFree(output);
 }
 
+// indent function for json
+static void append_indent(char *result, int number) {
+	for (int i = 0; i < number * JSON_INDENT; ++i) {
+		result[strlen(result)] = ' ';
+	}
+}
+
+// format or compress json
+void EditJSONFormat(bool isFormat) {
+	const size_t len = SciCall_GetSelTextLength();
+	if (len == 0) {
+		return;
+	}
+
+	char *json = (char *)NP2HeapAlloc(len + 1);
+	SciCall_GetSelBytes(json);
+
+	if (isFormat) {
+		long long length = strlen(json);
+		bool is_escape_mode = false;
+		int indent_number = 0;
+		char current_char;
+		char wrap_char = '\0';
+		long long size = (length * 2) + 1;
+		char *result = (char *)malloc(size);
+		memset(result, 0, size);
+
+		long long result_index = 0;
+
+		for (long i = 0; i < length; i++) {
+			current_char = json[i];
+
+			if (wrap_char == '\0' &&
+				(current_char == '\t' || current_char == '\n' || current_char == '\r' || current_char == ' ')) {
+				continue;
+			}
+			if (wrap_char == '\0' && current_char == ':') {
+				result[result_index++] = current_char;
+				result[result_index++] = ' ';
+				continue;
+			}
+
+			if (current_char == '"') {
+				if (wrap_char == '\0') {
+					wrap_char = current_char;
+				} else if (is_escape_mode) {
+					is_escape_mode = false;
+				} else {
+					wrap_char = '\0';
+				}
+
+				result[result_index++] = current_char;
+				continue;
+			}
+
+			if (current_char == '\\') {
+				if (wrap_char != '\0') {
+					is_escape_mode = !is_escape_mode;
+				}
+				result[result_index++] = current_char;
+				continue;
+			}
+
+			if (wrap_char != '\0') {
+				result[result_index++] = current_char;
+				continue;
+			}
+
+			if (current_char == '[' || current_char == '{') {
+				result[result_index++] = current_char;
+				result[result_index++] = '\n';
+				indent_number++;
+				append_indent(result + result_index, indent_number);
+				result_index += indent_number * JSON_INDENT;
+				continue;
+			}
+
+			if (current_char == ']' || current_char == '}') {
+				result[result_index++] = '\n';
+				indent_number--;
+				append_indent(result + result_index, indent_number);
+				result_index += indent_number * JSON_INDENT;
+				result[result_index++] = current_char;
+				continue;
+			}
+
+			if (current_char == ',') {
+				result[result_index++] = current_char;
+				result[result_index++] = '\n';
+				append_indent(result + result_index, indent_number);
+				result_index += indent_number * JSON_INDENT;
+				continue;
+			}
+
+			result[result_index++] = current_char;
+
+			if (result_index + 1 >= size) {
+				size = result_index += size / 2;
+				char *new_result = realloc(result, size);
+				if (new_result == NULL) {
+					fprintf(stderr, "Error: Failed to reallocate memory in format_json() loop.\n");
+					free(result);
+					return;
+				} else {
+					result = new_result;
+				}
+			}
+		}
+
+		char *new_result = realloc(result, result_index);
+		if (new_result == NULL) {
+			fprintf(stderr, "Error: Failed to reallocate memory in format_json().\n");
+			free(result);
+			return;
+		} else {
+			result[result_index] = '\0';
+			result = new_result;
+		}
+
+		EditReplaceMainSelection(strlen(result), result);
+		NP2HeapFree(json);
+	} else {
+		long long length = strlen(json);
+		bool isWarp = false;
+		char *result = (char *)malloc(length + 1); // 分配额外空间，同时留一个位置给字符串结束符'\0'
+		memset(result, 0, length + 1);
+
+		char current_char;
+		long long result_index = 0;
+		for (int i = 0; i < length; i++) {
+			current_char = json[i];
+
+			if (current_char == '"') {
+				if (i > 0 && json[i - 1] != '\\' || (i > 1 && json[i - 2] == '\\')) {
+					isWarp = !isWarp;
+				}
+			}
+
+			if (!isWarp) {
+				if (current_char == '\t' || current_char == '\n' || current_char == '\r' || current_char == ' ') {
+					continue;
+				}
+			}
+
+			result[result_index++] = current_char;
+		}
+
+		result[result_index] = '\0';
+		char *new_result = realloc(result, result_index + 1);
+		if (new_result == NULL) {
+			fprintf(stderr, "Error: Failed to reallocate memory in compress_json().\n");
+			free(result);
+			return;
+		} else {
+			result = new_result;
+		}
+
+		EditReplaceMainSelection(strlen(result), result);
+		NP2HeapFree(json);
+	}
+}
+
 //=============================================================================
 //
 // EditConvertNumRadix()

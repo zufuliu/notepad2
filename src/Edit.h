@@ -32,6 +32,7 @@
 #define NP2_MarkAllBookmark		0x00002000
 #define NP2_MarkAllSelectAll	0x00004000
 #define NP2_FromFindAll			0x00008000
+#define JSON_INDENT				4
 
 typedef struct EDITFINDREPLACE {
 	char	szFind[512];
@@ -154,6 +155,7 @@ typedef enum Base64EncodingFlag {
 } Base64EncodingFlag;
 void	EditBase64Encode(Base64EncodingFlag encodingFlag);
 void	EditBase64Decode(bool decodeAsHex);
+void	EditJSONFormat(bool isFormat);
 void	EditConvertNumRadix(int radix);
 void	EditModifyNumber(bool bIncrease);
 
