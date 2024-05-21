@@ -516,6 +516,20 @@ BOOL WINAPI ConsoleHandlerRoutine(DWORD dwCtrlType) {
 	return FALSE;
 }
 
+static void SetShortcutEnvironments(WCHAR *wCD) {
+	WCHAR wchPath[32767] = L"", *p;
+	int len = lstrlen(wCD);
+
+	p = wchPath + len + 1;
+	GetEnvironmentVariable(L"Path", p, 32767 - 1 - len);
+	if (!StrHasPrefixCaseEx(p, wCD, len) && p[len] != L';') {
+		lstrcpy(wchPath, wCD);
+		wchPath[len] = L';';
+		SetEnvironmentVariable(L"Path", wchPath);
+	}
+	SetEnvironmentVariable(L"N2Root", wCD);
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nShowCmd) {
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(lpCmdLine);
@@ -563,6 +577,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
 	GetModuleFileName(NULL, wchWorkingDirectory, COUNTOF(wchWorkingDirectory));
 	PathRemoveFileSpec(wchWorkingDirectory);
 	SetCurrentDirectory(wchWorkingDirectory);
+
+	SetShortcutEnvironments(wchWorkingDirectory);
 
 	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
 
